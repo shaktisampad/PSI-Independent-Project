@@ -1,0 +1,1348 @@
+---
+title: "PSI Project: Logistic Regression"
+output:
+  html_document:
+    df_print: paged
+  html_notebook:
+    fig_caption: yes
+editor_options:
+  chunk_output_type: console
+---
+### Preliminaries
+
+```{r setup , results='hide', message=FALSE, warning=FALSE}
+
+needed_packages <- c("pastecs", "ggplot2", "psych", "semTools", "FSA", "sjstats", "userfriendlyscience","corrplot")                      
+not_installed <- needed_packages[!(needed_packages %in% installed.packages()[ , "Package"])]    
+if(length(not_installed)) install.packages(not_installed) 
+
+library(pastecs)
+library(ggplot2)
+library(psych)
+library(semTools)
+library(FSA)
+library(sjstats)
+library(userfriendlyscience)
+library(corrplot)
+```
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+needed_packages <- c("foreign",  "Epi", "arm", "DescTools", "stargazer", "lmtest",  "car", "generalhoslem","regclass","coda","VIM","ggplot2","pastecs","FSA")
+not_installed <- needed_packages[!(needed_packages %in% installed.packages()[ , "Package"])]    
+if(length(not_installed)) install.packages(not_installed, repos = "http://cran.us.r-project.org") 
+
+library(Epi)
+library(DescTools)
+library(stargazer)
+library(foreign)
+library(coda)
+library(arm)
+library(lmtest)
+library(car)
+library(generalhoslem)
+library("regclass")
+library(dplyr)
+library("VIM")
+```
+## Data preparation
+
+The target variable is changed from character to integer.
+```{r}
+#Read Math dataset from CSV
+bank=read.table("bank-additional-full.csv",sep=";",header=TRUE)
+bank$y_new<-case_when(bank$y=="yes" ~ 1,
+                     TRUE ~ 0)
+
+summary(bank)
+
+```
+## Handling missing data
+
+In the data set all the missing data are represented as unknown. Let's convert them to NA and check if there is any pattern present in the missing data.
+
+Covert all the categorical attributes to factors.
+```{r}
+bank$job<-case_when(bank$job=="unknown" ~ NA_character_ ,
+                     TRUE ~ bank$job)
+bank$job<-as.factor(bank$job)
+bank$marital<-case_when(bank$marital=="unknown" ~ NA_character_ ,
+                     TRUE ~ bank$marital)
+bank$marital<-as.factor(bank$marital)
+
+bank$education<-case_when(bank$education=="unknown" ~ NA_character_ ,
+                     TRUE ~ bank$education)
+bank$education<-as.factor(bank$education)
+
+bank$default<-case_when(bank$default=="unknown" ~ NA_character_ ,
+                     TRUE ~ bank$default)
+bank$default<-as.factor(bank$default)
+
+bank$housing<-case_when(bank$housing=="unknown" ~ NA_character_ ,
+                     TRUE ~ bank$housing)
+bank$housing<-as.factor(bank$housing)
+
+bank$loan<-case_when(bank$loan=="unknown" ~ NA_character_ ,
+                     TRUE ~ bank$loan)
+bank$loan<-as.factor(bank$loan)
+
+
+bank$contact<-as.factor(bank$contact)
+bank$month<-as.factor(bank$month)
+bank$day_of_week<-as.factor(bank$day_of_week)
+bank$poutcome<-as.factor(bank$poutcome)
+bank$y<-as.factor(bank$y)
+
+summary(bank)
+
+#Create and inspect patterns of missingness
+res<-summary(VIM::aggr(bank[,c('job','marital','education','default','housing','loan')], sortVar=TRUE))$combinations
+res$Percent<-round(res$Percent,2)
+head(res[rev(order(res[,2])),],10)
+
+#metrics plot
+VIM::matrixplot(bank[,c('job','marital','education','default','housing','loan')], sortby = 2)
+
+summary(bank[is.na(bank$loan),])
+summary(bank)
+#Removing missing data
+bank<-bank[complete.cases(bank), ]
+
+
+```
+## Data Representativeness
+
+```{r}
+summary(bank)
+barplot(table(bank$y),main="Outcome Distribution",
+   xlab="Outcome (y)")
+```
+## Normality check for Euribor3m
+
+##### Plot histogram
+
+```{r}
+#Analyse the normale distribution of Euribor3m
+gg<-ggplot(data = bank,mapping = aes(x=bank$euribor3m))
+#Change the label of the x axis
+gg <- gg + labs(x="Euribor")
+
+#manage binwidth and colours
+gg <- gg + geom_histogram(binwidth=2, colour="black", aes(y=..density.., fill=..count..))
+gg <- gg + scale_fill_gradient("Count", low="#EBF5FB", high="#1B4F72")
+
+#adding a normal curve
+gg <- gg + stat_function(fun=dnorm, color="red",args=list(mean=mean(bank$euribor3m, na.rm=TRUE), sd=sd(bank$euribor3m, na.rm=TRUE)))
+gg
+```
+
+##### Plot Q-Q Plot
+```{r}
+#Create a qqplot
+qqnorm(bank$euribor3m)
+qqline(bank$euribor3m, col=2)
+```
+
+##### Summary Statistics
+
+```{r}
+
+stat.desc(bank$euribor3m, basic=F)
+```
+
+##### Skew and kurtosis Test:
+The standardized scores(value/std. error) for Skewness and kurtosis between +/- 2 are considered acceptable in order to prove **normal univariate distribution**.
+
+```{r}
+#We can make our decision based on the value of the standardised score for skew and kurtosis
+#We divide the skew statistic by the standard error to get the standardised score
+#This will indicate if we have a problem
+tpskew<-semTools::skew(bank$euribor3m)
+tpskew[1]/tpskew[2]
+
+tpkurt<-semTools::kurtosis(bank$euribor3m)
+tpkurt[1]/tpkurt[2]
+```
+As the standardized scores of the Skew and kurtosis is outside of +/- 2 the impact need to be accessed. We need to check how much percentage of standardized score falling outside of 1.96. If it is less than 5%, then it is safe to say as a ***Normal Distribution***.
+
+As the number of sample is more than 80, we need to getback with the percentage of observation falling outside 3.29.
+
+```{r}
+#and by calculating the percentage of standardised scores for the variable itself that are outside our acceptable range
+#This will tell us how big a problem we have
+# Calculate the percentage of standardised scores that are greated than 1.96
+# the perc function which is part of the FSA package which calculate the percentage that are within a range - you can look for greater than "gt", greater than or equal "geq", "gt", less than or equal "leq",  or less than "lt"),
+# scale is a function that creates z scores, abs gets absolute value
+
+ztpcoiss<- abs(scale(bank$euribor3m))
+
+perc(as.numeric(ztpcoiss), 1.96, "gt")
+perc(as.numeric(ztpcoiss), 3.29, "gt")
+```
+### Report assessment of normality
+<p style="text-align:justify">
+Euribor3m score data was assessed for normality. Visual inspection of the histogram and QQ-Plot (see Figure 1 and Figure 2) identified some issues with skewness and kurtosis. The standardised score for kurtosis (`r round(tpkurt[1]/tpkurt[2],2)`) and the standardised score for skewness (`r round(tpskew[1]/tpskew[2],2)`)  were outside the acceptable range using the criteria proposed by West, Finch and Curran (1996).  However 100% of Euribor3m fall within the bounds of +/- 3.29, using the guidance of Field, Miles and Field (2013) the data can be considered to approximate a normal distribution (m=`r round(mean(bank$euribor3m, na.rm=TRUE),2)`, sd=`r round(sd(bank$euribor3m, na.rm=TRUE),2)`, n=`r length(bank$euribor3m)-sum(is.na(bank$euribor3m))`).
+</p>
+
+## Normality check for Number of employees (nr.employed)
+
+##### Plot histogram
+
+```{r}
+#Analyse the normale distribution of nr.employed
+gg<-ggplot(data = bank,mapping = aes(x=bank$nr.employed))
+#Change the label of the x axis
+gg <- gg + labs(x="nr.employed")
+
+#manage binwidth and colours
+gg <- gg + geom_histogram(binwidth=2, colour="black", aes(y=..density.., fill=..count..))
+gg <- gg + scale_fill_gradient("Count", low="#EBF5FB", high="#1B4F72")
+gg <- gg + stat_function(fun=dnorm, color="red",args=list(mean=mean(bank$nr.employed, na.rm=TRUE), sd=sd(bank$nr.employed, na.rm=TRUE)))
+gg
+```
+
+##### Plot Q-Q Plot
+```{r}
+#Create a qqplot
+qqnorm(bank$nr.employed)
+qqline(bank$nr.employed, col=2)
+```
+
+##### Summary Statistics
+
+```{r}
+#stat.desc is a function from pastecs - make sure you include the basic switch=F to ensure you don't get scienfitic notation
+stat.desc(bank$nr.employed, basic=F)
+```
+
+##### Skew and kurtosis Test:
+The standardized scores(value/std. error) for Skewness and kurtosis between +/- 2 are considered acceptable in order to prove **normal univariate distribution**.
+
+```{r}
+tpskew<-semTools::skew(bank$nr.employed)
+tpskew[1]/tpskew[2]
+
+tpkurt<-semTools::kurtosis(bank$nr.employed)
+tpkurt[1]/tpkurt[2]
+```
+As the standardized scores of the Skew and kurtosis is outside of +/- 2 the impact need to be accessed. We need to check how much percentage of standardized score falling outside of 1.96. If it is less than 5%, then it is safe to say as a ***Normal Distribution***.
+
+As the number of sample is more than 80, we need to getback with the percentage of observation falling outside 3.29.
+
+```{r}
+ztpcoiss<- abs(scale(bank$nr.employed))
+
+perc(as.numeric(ztpcoiss), 1.96, "gt")
+perc(as.numeric(ztpcoiss), 3.29, "gt")
+```
+### Report assessment of normality
+<p style="text-align:justify">
+Number of employees data was assessed for normality. Visual inspection of the histogram and QQ-Plot (see Figure 1 and Figure 2) identified some issues with skewness and kurtosis. The standardized score for kurtosis (`r round(tpkurt[1]/tpkurt[2],2)`) and the standardized score for skewness (`r round(tpskew[1]/tpskew[2],2)`)  were outside the acceptable range using the criteria proposed by West, Finch and Curran (1996).  However 100% of Number of employees fall within the bounds of +/- 3.29, using the guidance of Field, Miles and Field (2013) the data can be considered to approximate a normal distribution (m=`r round(mean(bank$nr.employed, na.rm=TRUE),2)`, sd=`r round(sd(bank$nr.employed, na.rm=TRUE),2)`, n=`r length(bank$nr.employed)-sum(is.na(bank$nr.employed))`).
+</p>
+
+## Normality check for emp.var.rate
+
+##### Plot histogram
+
+```{r}
+#Analyse the normale distribution of Grade
+gg<-ggplot(data = bank,mapping = aes(x=bank$emp.var.rate))
+#Change the label of the x axis
+gg <- gg + labs(x="emp.var.rate")
+
+#manage binwidth and colours
+gg <- gg + geom_histogram(binwidth=2, colour="black", aes(y=..density.., fill=..count..))
+gg <- gg + scale_fill_gradient("Count", low="#EBF5FB", high="#1B4F72")
+
+#adding a normal curve
+#use stat_function to compute a normalised score for each value of tpcoiss
+#pass the mean and standard deviation
+#use the na.rm parameter to say how missing values are handled
+gg <- gg + stat_function(fun=dnorm, color="red",args=list(mean=mean(bank$emp.var.rate, na.rm=TRUE), sd=sd(bank$emp.var.rate, na.rm=TRUE)))
+gg
+```
+
+##### Plot Q-Q Plot
+```{r}
+#Create a qqplot
+qqnorm(bank$emp.var.rate)
+qqline(bank$emp.var.rate, col=2) #show a line on theplot
+```
+
+##### Summary Statistics
+
+```{r}
+#stat.desc is a function from pastecs - make sure you include the basic switch=F to ensure you don't get scienfitic notation
+stat.desc(bank$emp.var.rate, basic=F)
+```
+
+##### Skew and kurtosis Test:
+The standardized scores(value/std. error) for Skewness and kurtosis between +/- 2 are considered acceptable in order to prove **normal univariate distribution**.
+
+```{r}
+#We can make our decision based on the value of the standardised score for skew and kurtosis
+#We divide the skew statistic by the standard error to get the standardised score
+#This will indicate if we have a problem
+tpskew<-semTools::skew(bank$emp.var.rate)
+tpskew[1]/tpskew[2]
+
+tpkurt<-semTools::kurtosis(bank$emp.var.rate)
+tpkurt[1]/tpkurt[2]
+```
+As the standardized scores of the Skew and kurtosis is outside of +/- 2 the impact need to be accessed. We need to check how much percentage of standardized score falling outside of 1.96. If it is less than 5%, then it is safe to say as a ***Normal Distribution***.
+
+As the number of sample is more than 80, we need to getback with the percentage of observation falling outside 3.29.
+
+```{r}
+#and by calculating the percentage of standardised scores for the variable itself that are outside our acceptable range
+#This will tell us how big a problem we have
+# Calculate the percentage of standardised scores that are greated than 1.96
+# the perc function which is part of the FSA package which calculate the percentage that are within a range - you can look for greater than "gt", greater than or equal "geq", "gt", less than or equal "leq",  or less than "lt"),
+# scale is a function that creates z scores, abs gets absolute value
+
+ztpcoiss<- abs(scale(bank$emp.var.rate))
+
+perc(as.numeric(ztpcoiss), 1.96, "gt")
+perc(as.numeric(ztpcoiss), 3.29, "gt")
+```
+### Report assessment of normality
+<p style="text-align:justify">
+emp.var.rate score data was assessed for normality. Visual inspection of the histogram and QQ-Plot (see Figure 1 and Figure 2) identified some issues with skewness and kurtosis. The standardised score for kurtosis (`r round(tpkurt[1]/tpkurt[2],2)`) and the standardised score for skewness (`r round(tpskew[1]/tpskew[2],2)`)  were outside the acceptable range using the criteria proposed by West, Finch and Curran (1996).  However 100% of standardised emp.var.rate fall within the bounds of +/- 3.29, using the guidance of Field, Miles and Field (2013) the data can be considered to approximate a normal distribution (m=`r round(mean(bank$emp.var.rate, na.rm=TRUE),2)`, sd=`r round(sd(bank$emp.var.rate, na.rm=TRUE),2)`, n=`r length(bank$emp.var.rate)-sum(is.na(bank$emp.var.rate))`).
+</p>
+
+## Normality check for cons.price.idx
+
+##### Plot histogram
+
+```{r}
+#Analyse the normale distribution of Grade
+gg<-ggplot(data = bank,mapping = aes(x=bank$cons.price.idx))
+#Change the label of the x axis
+gg <- gg + labs(x="cons.price.idx")
+
+#manage binwidth and colours
+gg <- gg + geom_histogram(binwidth=2, colour="black", aes(y=..density.., fill=..count..))
+gg <- gg + scale_fill_gradient("Count", low="#EBF5FB", high="#1B4F72")
+
+#adding a normal curve
+#use stat_function to compute a normalised score for each value of tpcoiss
+#pass the mean and standard deviation
+#use the na.rm parameter to say how missing values are handled
+gg <- gg + stat_function(fun=dnorm, color="red",args=list(mean=mean(bank$cons.price.idx, na.rm=TRUE), sd=sd(bank$cons.price.idx, na.rm=TRUE)))
+gg
+```
+
+##### Plot Q-Q Plot
+```{r}
+#Create a qqplot
+qqnorm(bank$cons.price.idx)
+qqline(bank$cons.price.idx, col=2) #show a line on theplot
+```
+
+##### Summary Statistics
+
+```{r}
+#stat.desc is a function from pastecs - make sure you include the basic switch=F to ensure you don't get scienfitic notation
+stat.desc(bank$cons.price.idx, basic=F)
+```
+
+##### Skew and kurtosis Test:
+The standardized scores(value/std. error) for Skewness and kurtosis between +/- 2 are considered acceptable in order to prove **normal univariate distribution**.
+
+```{r}
+#We can make our decision based on the value of the standardised score for skew and kurtosis
+#We divide the skew statistic by the standard error to get the standardised score
+#This will indicate if we have a problem
+tpskew<-semTools::skew(bank$cons.price.idx)
+tpskew[1]/tpskew[2]
+
+tpkurt<-semTools::kurtosis(bank$cons.price.idx)
+tpkurt[1]/tpkurt[2]
+```
+As the standardized scores of the Skew and kurtosis is outside of +/- 2 the impact need to be accessed. We need to check how much percentage of standardized score falling outside of 1.96. If it is less than 5%, then it is safe to say as a ***Normal Distribution***.
+
+As the number of sample is more than 80, we need to getback with the percentage of observation falling outside 3.29.
+
+```{r}
+#and by calculating the percentage of standardised scores for the variable itself that are outside our acceptable range
+#This will tell us how big a problem we have
+# Calculate the percentage of standardised scores that are greated than 1.96
+# the perc function which is part of the FSA package which calculate the percentage that are within a range - you can look for greater than "gt", greater than or equal "geq", "gt", less than or equal "leq",  or less than "lt"),
+# scale is a function that creates z scores, abs gets absolute value
+
+ztpcoiss<- abs(scale(bank$cons.price.idx))
+
+perc(as.numeric(ztpcoiss), 1.96, "gt")
+perc(as.numeric(ztpcoiss), 3.29, "gt")
+```
+### Report assessment of normality
+<p style="text-align:justify">
+cons.price.idx score data was assessed for normality. Visual inspection of the histogram and QQ-Plot (see Figure 1 and Figure 2) identified some issues with skewness and kurtosis. The standardised score for kurtosis (`r round(tpkurt[1]/tpkurt[2],2)`) and the standardised score for skewness (`r round(tpskew[1]/tpskew[2],2)`)  were outside the acceptable range using the criteria proposed by West, Finch and Curran (1996).  However 100% of standardised cons.price.idx fall within the bounds of +/- 3.29, using the guidance of Field, Miles and Field (2013) the data can be considered to approximate a normal distribution (m=`r round(mean(bank$cons.price.idx, na.rm=TRUE),2)`, sd=`r round(sd(bank$cons.price.idx, na.rm=TRUE),2)`, n=`r length(bank$cons.price.idx)-sum(is.na(bank$cons.price.idx))`).
+</p>
+
+## Normality check for cons.conf.idx
+
+##### Plot histogram
+
+```{r}
+#Analyse the normale distribution of Grade
+gg<-ggplot(data = bank,mapping = aes(x=bank$cons.conf.idx))
+#Change the label of the x axis
+gg <- gg + labs(x="cons.conf.idx")
+
+#manage binwidth and colours
+gg <- gg + geom_histogram(binwidth=2, colour="black", aes(y=..density.., fill=..count..))
+gg <- gg + scale_fill_gradient("Count", low="#EBF5FB", high="#1B4F72")
+
+#adding a normal curve
+#use stat_function to compute a normalised score for each value of tpcoiss
+#pass the mean and standard deviation
+#use the na.rm parameter to say how missing values are handled
+gg <- gg + stat_function(fun=dnorm, color="red",args=list(mean=mean(bank$cons.conf.idx, na.rm=TRUE), sd=sd(bank$cons.conf.idx, na.rm=TRUE)))
+gg
+```
+
+##### Plot Q-Q Plot
+```{r}
+#Create a qqplot
+qqnorm(bank$cons.conf.idx)
+qqline(bank$cons.conf.idx, col=2) #show a line on theplot
+```
+
+##### Summary Statistics
+
+```{r}
+#stat.desc is a function from pastecs - make sure you include the basic switch=F to ensure you don't get scienfitic notation
+stat.desc(bank$cons.conf.idx, basic=F)
+```
+
+##### Skew and kurtosis Test:
+The standardized scores(value/std. error) for Skewness and kurtosis between +/- 2 are considered acceptable in order to prove **normal univariate distribution**.
+
+```{r}
+#We can make our decision based on the value of the standardised score for skew and kurtosis
+#We divide the skew statistic by the standard error to get the standardised score
+#This will indicate if we have a problem
+tpskew<-semTools::skew(bank$cons.conf.idx)
+tpskew[1]/tpskew[2]
+
+tpkurt<-semTools::kurtosis(bank$cons.conf.idx)
+tpkurt[1]/tpkurt[2]
+```
+As the standardized scores of the Skew and kurtosis is outside of +/- 2 the impact need to be accessed. We need to check how much percentage of standardized score falling outside of 1.96. If it is less than 5%, then it is safe to say as a ***Normal Distribution***.
+
+As the number of sample is more than 80, we need to getback with the percentage of observation falling outside 3.29.
+
+```{r}
+#and by calculating the percentage of standardised scores for the variable itself that are outside our acceptable range
+#This will tell us how big a problem we have
+# Calculate the percentage of standardised scores that are greated than 1.96
+# the perc function which is part of the FSA package which calculate the percentage that are within a range - you can look for greater than "gt", greater than or equal "geq", "gt", less than or equal "leq",  or less than "lt"),
+# scale is a function that creates z scores, abs gets absolute value
+
+ztpcoiss<- abs(scale(bank$cons.conf.idx))
+
+perc(as.numeric(ztpcoiss), 1.96, "gt")
+perc(as.numeric(ztpcoiss), 3.29, "gt")
+```
+### Report assessment of normality
+<p style="text-align:justify">
+cons.conf.idx score data was assessed for normality. Visual inspection of the histogram and QQ-Plot (see Figure 1 and Figure 2) identified some issues with skewness and kurtosis. The standardised score for kurtosis (`r round(tpkurt[1]/tpkurt[2],2)`) and the standardised score for skewness (`r round(tpskew[1]/tpskew[2],2)`)  were outside the acceptable range using the criteria proposed by West, Finch and Curran (1996).  However 100% of standardised cons.conf.idx fall within the bounds of +/- 3.29, using the guidance of Field, Miles and Field (2013) the data can be considered to approximate a normal distribution (m=`r round(mean(bank$cons.conf.idx, na.rm=TRUE),2)`, sd=`r round(sd(bank$cons.conf.idx, na.rm=TRUE),2)`, n=`r length(bank$cons.conf.idx)-sum(is.na(bank$cons.conf.idx))`).
+</p>
+
+# Correlation check for Social and economic attributes
+
+```{r}
+secor = cor(bank[,c('euribor3m','nr.employed','cons.price.idx','cons.conf.idx','emp.var.rate')], method = c("pearson"))
+corrplot::corrplot(secor, method = "number")
+corrplot::corrplot(secor, method = "number")
+library(car)
+panel.lm <- function (x, y,  pch = par("pch"), col.lm = "red",  ...) {   
+  ymin <- min(y)
+  ymax <- max(y)
+  xmin <- min(x)
+  xmax <- max(x)
+  ylim <- c(min(ymin,xmin),max(ymax,xmax))
+  xlim <- ylim
+  points(x, y, pch = pch,ylim = ylim, xlim= xlim,...)
+  ok <- is.finite(x) & is.finite(y)
+  if (any(ok)) 
+    abline(lm(y[ok]~ x[ok]), 
+           col = col.lm, ...)
+}
+pairs(~euribor3m+nr.employed+cons.price.idx+cons.conf.idx+emp.var.rate, data=bank,main="Social and Economic indicators", lower.panel = panel.lm, upper.panel = panel.lm)
+```
+
+
+#### Conducting Correlation Tests - Pearson for Social and economic attributes
+ 
+```{r}
+
+#Pearson Correlation
+stats::cor.test(bank$nr.employed, bank$euribor3m, method='pearson')
+stats::cor.test(bank$nr.employed, bank$cons.price.idx, method='pearson')
+stats::cor.test(bank$nr.employed, bank$cons.conf.idx, method='pearson')
+stats::cor.test(bank$nr.employed, bank$emp.var.rate, method='pearson')
+```
+
+## Model-1 | nr.employed as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel1 <- glm(y_new ~ nr.employed , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+sum<-summary(logmodel1)
+sum
+
+m1aic<-round(sum$aic,0)
+m1aic<-as.integer(m1aic)
+```
+
+This relationship between nr.employed and target variable is statically significant as the probability is <0.001.
+
+The AIC of the model is: `r m1aic`
+
+```{r}
+#Chi-square plus significance
+rtest<-lmtest::lrtest(logmodel1)
+rtest
+```
+
+The likelihood ratio test suggest the model is statically significant as the probability is <0.001.
+
+```{r}                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed, plot="ROC")
+m1auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m1csr2<-DescTools::PseudoR2(logmodel1, which="CoxSnell")
+m1csr2
+m1knr2<-DescTools::PseudoR2(logmodel1, which="Nagelkerke")
+m1knr2
+```
+
+The AUC of the model is: `r m1auc`
+
+The pseudo R square indicate that between `r round(m1csr2*100,2)`%  and `r round(m1knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+
+#Summary of the model with co-efficients
+stargazer(logmodel1, type="text")
+```
+
+## Model-2 | nr.employed and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel2 <- glm(y_new ~ nr.employed+cons.conf.idx , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+sum<-summary(logmodel2)
+sum
+
+m2aic<-as.integer(round(sum$aic,0))
+```
+
+This relationship between nr.employed, cons.conf.idx and target variable is statically significant as the probability is <0.001.
+
+The AIC of the model is: `r m2aic`
+
+```{r}
+#Chi-square plus significance
+lmtest::lrtest(logmodel1,logmodel2)
+```
+
+The likelihood ratio test suggest the model-2 is statically significant than model 1 as the probability is <0.001.
+
+```{r}  
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$cons.conf.idx, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$cons.conf.idx, plot="ROC")
+m2auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m2csr2<-DescTools::PseudoR2(logmodel2, which="CoxSnell")
+m2csr2
+m2knr2<-DescTools::PseudoR2(logmodel2, which="Nagelkerke")
+m2knr2
+```
+
+The AUC of the model is: `r m2auc`
+
+The pseudo R square indicate that between `r round(m2csr2*100,2)`%  and `r round(m2knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel2, type="text")
+```
+## Build third model with nr.employed and job as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel3 <- glm(y_new ~ nr.employed+age , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel3)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel1,logmodel3)
+```
+
+The likelihood ratio test suggest the model-3 is statically significant than model-2 as the probability is <0.001.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$age, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$age, plot="ROC")
+m3auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m3csr2<-DescTools::PseudoR2(logmodel3, which="CoxSnell")
+m3csr2
+m3knr2<-DescTools::PseudoR2(logmodel3, which="Nagelkerke")
+m3knr2
+```
+
+The AUC of the model is: `r m3auc`
+
+The pseudo R square indicate that between `r round(m3csr2*100,2)`%  and `r round(m3knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel3, type="text")
+```
+## Build fourth model with euribor3m, nr.employed, emp.var.rate and cons.price.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel4 <- glm(y_new ~ nr.employed+job , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel4)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel1,logmodel4)
+```
+
+The likelihood ratio test suggest the model-4 is statically significant than model-5 as the probability is <0.001.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job, plot="ROC")
+m4auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m4csr2<-DescTools::PseudoR2(logmodel4, which="CoxSnell")
+m4csr2
+m4knr2<-DescTools::PseudoR2(logmodel4, which="Nagelkerke")
+m4knr2
+```
+
+The AUC of the model is: `r m4auc`
+
+The pseudo R square indicate that between `r round(m4csr2*100,2)`%  and `r round(m4knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel4, type="text")
+```
+## Build fourth model with euribor3m, nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel5 <- glm(y_new ~ nr.employed+job+marital , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel5)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel4,logmodel5)
+```
+
+The likelihood ratio test suggest the model-5 is statically significant than model-4 as the probability is <0.001. But the probability for euribor3m is now statically not significant as it is 0.46(>0.05). So , in the next model let's exclude euribor3m attribute and compare the model with current model.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$marital, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$marital, plot="ROC")
+m5auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m5csr2<-DescTools::PseudoR2(logmodel5, which="CoxSnell")
+m5csr2
+m5knr2<-DescTools::PseudoR2(logmodel5, which="Nagelkerke")
+m5knr2
+```
+
+The AUC of the model is: `r m5auc`
+
+The pseudo R square indicate that between `r round(m5csr2*100,2)`%  and `r round(m5knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel5, type="text")
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel6 <- glm(y_new ~ nr.employed+job+education , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel6)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel4,logmodel6)
+```
+
+The likelihood ratio test suggest the model-6 is not statically significant than model-5 as the probability is 0.46(>0.05). That means removing euribor3m column affected the model negatively. So, we will add back euribor3m column to the next model.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$education, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$education, plot="ROC")
+m6auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m6csr2<-DescTools::PseudoR2(logmodel6, which="CoxSnell")
+m6csr2
+m6knr2<-DescTools::PseudoR2(logmodel6, which="Nagelkerke")
+m6knr2
+```
+
+The AUC of the model is: `r m6auc`
+
+The pseudo R square indicate that between `r round(m6csr2*100,2)`%  and `r round(m6knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel6, type="text")
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel7 <- glm(y_new ~ nr.employed+job+housing , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel7)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel4,logmodel7)
+```
+
+The likelihood ratio test suggest the model-7 is statically significant than model-5 as the probability is <0.001.
+
+```{r}
+
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$housing, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$housing, plot="ROC")
+m7auc<-round(p$AUC,3)
+#Pseudo Rsquared 
+m7csr2<-DescTools::PseudoR2(logmodel7, which="CoxSnell")
+m7csr2
+m7knr2<-DescTools::PseudoR2(logmodel7, which="Nagelkerke")
+m7knr2
+```
+
+The AUC of the model is: `r m1auc`
+
+The pseudo R square indicate that between `r round(m7csr2*100,2)`%  and `r round(m7knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel7, type="text")
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel8 <- glm(y_new ~ nr.employed+job+loan , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel8)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel4,logmodel8)
+```
+
+The likelihood ratio test suggest the model-8 is statically significant than model-7 as the probability is <0.001.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$loan, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$loan, plot="ROC")
+m8auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m8csr2<-DescTools::PseudoR2(logmodel8, which="CoxSnell")
+m8csr2
+m8knr2<-DescTools::PseudoR2(logmodel8, which="Nagelkerke")
+m8knr2
+```
+
+The AUC of the model is: `r m8auc`
+
+The pseudo R square indicate that between `r round(m8csr2*100,2)`%  and `r round(m8knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel8, type="text")
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel9 <- glm(y_new ~ nr.employed+job+contact , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel9)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel4,logmodel9)
+```
+
+The likelihood ratio test suggest the model-9 is statically significant than model-8 as the probability is <0.001.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact, plot="ROC")
+m9auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m9csr2<-DescTools::PseudoR2(logmodel9, which="CoxSnell")
+m9csr2
+m9knr2<-DescTools::PseudoR2(logmodel9, which="Nagelkerke")
+m9knr2
+```
+
+The AUC of the model is: `r m9auc`
+
+The pseudo R square indicate that between `r round(m9csr2*100,2)`%  and `r round(m9knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel9, type="text")
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel10 <- glm(y_new ~ nr.employed+job+contact+month , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel10)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel9,logmodel10)
+```
+
+The likelihood ratio test suggest the model-10 is statically significant than model-9 as the probability is <0.001.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month, plot="ROC")
+m10auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m10csr2<-DescTools::PseudoR2(logmodel10, which="CoxSnell")
+m10csr2
+m10knr2<-DescTools::PseudoR2(logmodel10, which="Nagelkerke")
+m10knr2
+```
+
+The AUC of the model is: `r m10auc`
+
+The pseudo R square indicate that between `r round(m10csr2*100,2)`%  and `r round(m10knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel10, type="text")
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel11 <- glm(y_new ~ nr.employed+job+contact+month+day_of_week, data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel11)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel10,logmodel11)
+```
+
+The likelihood ratio test suggest the model-11 is statically not significant than model-10 as the probability is 0.16 (>0.05).
+
+All the martial categories except single are statically not significant. So, in the next model the education martial is excluded.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week, plot="ROC")
+m11auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m11csr2<-DescTools::PseudoR2(logmodel11, which="CoxSnell")
+m11csr2
+m11knr2<-DescTools::PseudoR2(logmodel11, which="Nagelkerke")
+m11knr2
+```
+
+The AUC of the model is: `r m11auc`
+
+The pseudo R square indicate that between `r round(m11csr2*100,2)`%  and `r round(m11knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel11, type="text")
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel12 <- glm(y_new ~ nr.employed+job+contact+month+day_of_week+campaign , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel12)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel11,logmodel12)
+```
+
+The likelihood ratio test suggest the model-12 is statically significant than model-10 as the probability is 0.18 (>0.05).
+
+All the education categories except university.degree are also statistically not significant. So, in the next model the education column is excluded.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week+bank$campaign, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week+bank$campaign, plot="ROC")
+m12auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m12csr2<-DescTools::PseudoR2(logmodel12, which="CoxSnell")
+m12csr2
+m12knr2<-DescTools::PseudoR2(logmodel12, which="Nagelkerke")
+m12knr2
+```
+
+The AUC of the model is: `r m12auc`
+
+The pseudo R square indicate that between `r round(m12csr2*100,2)`%  and `r round(m12knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel12, type="text")
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel13 <- glm(y_new ~ nr.employed+job+contact+month+day_of_week+campaign+pdays , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel13)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel12,logmodel13)
+```
+
+The likelihood ratio test suggest the model-13 is statically significant than model-10 as the probability is <0.001.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$pdays, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$pdays, plot="ROC")
+m13auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m13csr2<-DescTools::PseudoR2(logmodel13, which="CoxSnell")
+m13csr2
+m13knr2<-DescTools::PseudoR2(logmodel13, which="Nagelkerke")
+m13knr2
+```
+
+The AUC of the model is: `r m13auc`
+
+The pseudo R square indicate that between `r round(m13csr2*100,2)`%  and `r round(m13knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel13, type="text")
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel14 <- glm(y_new ~ nr.employed+job+contact+month+day_of_week+campaign+pdays+previous , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel14)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel13,logmodel14)
+```
+
+The likelihood ratio test suggest the model-14 is not statically significant than model-13 as the probability is 0.488 (>0.05). All the housing categories  are also statistically not significant. So, in the next model the housing column is excluded.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$pdays+bank$previous, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$pdays+bank$previous, plot="ROC")
+m14auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m14csr2<-DescTools::PseudoR2(logmodel14, which="CoxSnell")
+m14csr2
+m14knr2<-DescTools::PseudoR2(logmodel14, which="Nagelkerke")
+m14knr2
+```
+
+The AUC of the model is: `r m14auc`
+
+The pseudo R square indicate that between `r round(m14csr2*100,2)`%  and `r round(m14knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel14, type="text")
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel15 <- glm(y_new ~ nr.employed+job+contact+month+day_of_week+campaign+pdays+previous+poutcome , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel15)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel14,logmodel15)
+```
+
+The likelihood ratio test suggest the model-15 is not statically significant than model-13 as the probability is 0.607 (>0.05). All the loan categories  are also statistically not significant. So, in the next model the loan column is excluded.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$pdays+bank$previous+bank$poutcome, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$pdays+bank$previous+bank$poutcome, plot="ROC")
+m15auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m15csr2<-DescTools::PseudoR2(logmodel15, which="CoxSnell")
+m15csr2
+m15knr2<-DescTools::PseudoR2(logmodel15, which="Nagelkerke")
+m15knr2
+```
+
+The AUC of the model is: `r m15auc`
+
+The pseudo R square indicate that between `r round(m15csr2*100,2)`%  and `r round(m15knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel15, type="text")
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel16 <- glm(y_new ~ nr.employed+job+contact+month+day_of_week+campaign+pdays+poutcome , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel16)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel14,logmodel16)
+```
+
+The likelihood ratio test suggest the model-15 is not statically significant than model-13 as the probability is 0.607 (>0.05). All the loan categories  are also statistically not significant. So, in the next model the loan column is excluded.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$pdays+bank$poutcome, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$pdays+bank$poutcome, plot="ROC")
+m15auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m15csr2<-DescTools::PseudoR2(logmodel15, which="CoxSnell")
+m15csr2
+m15knr2<-DescTools::PseudoR2(logmodel15, which="Nagelkerke")
+m15knr2
+```
+
+The AUC of the model is: `r m15auc`
+
+The pseudo R square indicate that between `r round(m15csr2*100,2)`%  and `r round(m15knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel16, type="text")
+```
+
+# Confusion Matrix
+
+```{r}
+#Confusion matrix
+regclass::confusion_matrix(logmodel16)
+
+```
+
+# Confusion Matrix
+
+```{r}
+
+#Check the assumption of linearity of independent variables and log odds using a Hosmer-Lemeshow test, if this is not statistically significant we are ok
+
+generalhoslem::logitgof(bank$y_new, fitted(logmodel16))
+
+
+#Collinearity
+vifmodel<-car::vif(logmodel16)#You can ignore the warning messages, GVIF^(1/(2*Df)) is the value of interest
+vifmodel
+#Tolerance
+1/vifmodel
+```
+
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel16 <- glm(y_new ~ nr.employed+job+contact+month+day_of_week+campaign+poutcome , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel16)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel16)
+```
+
+The likelihood ratio test suggest the model-15 is not statically significant than model-13 as the probability is 0.607 (>0.05). All the loan categories  are also statistically not significant. So, in the next model the loan column is excluded.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$poutcome, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$job+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$poutcome, plot="ROC")
+m15auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m15csr2<-DescTools::PseudoR2(logmodel16, which="CoxSnell")
+m15csr2
+m15knr2<-DescTools::PseudoR2(logmodel16, which="Nagelkerke")
+m15knr2
+```
+
+The AUC of the model is: `r m15auc`
+
+The pseudo R square indicate that between `r round(m15csr2*100,2)`%  and `r round(m15knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel16, type="text")
+```
+
+# Confusion Matrix
+
+```{r}
+#Confusion matrix
+regclass::confusion_matrix(logmodel16)
+
+```
+
+# Confusion Matrix
+
+```{r}
+
+#Check the assumption of linearity of independent variables and log odds using a Hosmer-Lemeshow test, if this is not statistically significant we are ok
+
+generalhoslem::logitgof(bank$y_new, fitted(logmodel16))
+
+
+#Collinearity
+vifmodel<-car::vif(logmodel16)#You can ignore the warning messages, GVIF^(1/(2*Df)) is the value of interest
+vifmodel
+#Tolerance
+1/vifmodel
+```
+
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel17 <- glm(y_new ~ nr.employed+cons.conf.idx+age+job+marital+education+housing+loan+contact+month+day_of_week+campaign+pdays+previous+poutcome , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel17)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel17)
+```
+
+The likelihood ratio test suggest the model-15 is not statically significant than model-13 as the probability is 0.607 (>0.05). All the loan categories  are also statistically not significant. So, in the next model the loan column is excluded.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$cons.conf.idx+bank$age+bank$job+bank$marital+bank$education+bank$housing+bank$loan+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$pdays+bank$previous+bank$poutcome, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$cons.conf.idx+bank$age+bank$job+bank$marital+bank$education+bank$housing+bank$loan+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$pdays+bank$previous+bank$poutcome, plot="ROC")
+m15auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m15csr2<-DescTools::PseudoR2(logmodel17, which="CoxSnell")
+m15csr2
+m15knr2<-DescTools::PseudoR2(logmodel17, which="Nagelkerke")
+m15knr2
+```
+
+The AUC of the model is: `r m15auc`
+
+The pseudo R square indicate that between `r round(m15csr2*100,2)`%  and `r round(m15knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel17, type="text")
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel18 <- glm(y_new ~ nr.employed+cons.conf.idx+contact+month+day_of_week+campaign+pdays+poutcome , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel18)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel17,logmodel18)
+```
+
+The likelihood ratio test suggest the model-15 is not statically significant than model-13 as the probability is 0.607 (>0.05). All the loan categories  are also statistically not significant. So, in the next model the loan column is excluded.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$cons.conf.idx+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$pdays+bank$poutcome, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$cons.conf.idx+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$pdays+bank$poutcome, plot="ROC")
+m15auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m15csr2<-DescTools::PseudoR2(logmodel18, which="CoxSnell")
+m15csr2
+m15knr2<-DescTools::PseudoR2(logmodel18, which="Nagelkerke")
+m15knr2
+```
+
+The AUC of the model is: `r m15auc`
+
+The pseudo R square indicate that between `r round(m15csr2*100,2)`%  and `r round(m15knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel18, type="text")
+```
+# Confusion Matrix
+
+```{r}
+#Confusion matrix
+regclass::confusion_matrix(logmodel18)
+
+```
+
+# Confusion Matrix
+
+```{r}
+
+#Check the assumption of linearity of independent variables and log odds using a Hosmer-Lemeshow test, if this is not statistically significant we are ok
+
+generalhoslem::logitgof(bank$y_new, fitted(logmodel18))
+
+
+#Collinearity
+vifmodel<-car::vif(logmodel18)#You can ignore the warning messages, GVIF^(1/(2*Df)) is the value of interest
+vifmodel
+#Tolerance
+1/vifmodel
+```
+## Build fourth model with nr.employed, emp.var.rate, cons.price.idx and cons.conf.idx as predictor
+```{r}
+#Make sure categorical data is used as factors
+
+logmodel18 <- glm(y_new ~ nr.employed+cons.conf.idx+contact+month+day_of_week+campaign+poutcome , data = bank, na.action = na.exclude, family = binomial(link=logit))
+
+#Full summary of the model
+summary(logmodel18)
+
+#Chi-square plus significance
+lmtest::lrtest(logmodel18)
+
+```
+
+The likelihood ratio test suggest the model-15 is not statically significant than model-13 as the probability is 0.607 (>0.05). All the loan categories  are also statistically not significant. So, in the next model the loan column is excluded.
+
+```{r}
+                    
+#Output the sensitivity, specificity, and ROC plot
+Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$cons.conf.idx+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$poutcome, plot="ROC")
+p<-Epi::ROC(form=bank$y_new ~ bank$nr.employed+bank$cons.conf.idx+bank$contact+bank$month+bank$day_of_week+bank$campaign+bank$poutcome, plot="ROC")
+m15auc<-round(p$AUC,3)
+
+#Pseudo Rsquared 
+m15csr2<-DescTools::PseudoR2(logmodel18, which="CoxSnell")
+m15csr2
+m15knr2<-DescTools::PseudoR2(logmodel18, which="Nagelkerke")
+m15knr2
+```
+
+The AUC of the model is: `r m15auc`
+
+The pseudo R square indicate that between `r round(m15csr2*100,2)`%  and `r round(m15knr2*100,2)`% of the variability of responses to whether the customer opts for the term deposit or not.
+
+```{r}
+#Summary of the model with co-efficients
+stargazer(logmodel18, type="text")
+```
+# Confusion Matrix
+
+```{r}
+#Confusion matrix
+regclass::confusion_matrix(logmodel18)
+
+```
+
+# Confusion Matrix
+
+```{r}
+
+#Check the assumption of linearity of independent variables and log odds using a Hosmer-Lemeshow test, if this is not statistically significant we are ok
+
+generalhoslem::logitgof(bank$y_new, fitted(logmodel18))
+
+
+#Collinearity
+vifmodel<-car::vif(logmodel18)#You can ignore the warning messages, GVIF^(1/(2*Df)) is the value of interest
+vifmodel
+#Tolerance
+1/vifmodel
+```
